@@ -25,7 +25,8 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-	rate := flag.Int64("rate", 1, "Requests per second to send")
+	rate := flag.Int64("rate", 1, "Requests per second to send. Default: 1.")
+	limit := flag.Int64("limit", 0, "Total requests to send. Default: send until interrupted.")
 	method := flag.String("method", "get", "HTTP method")
 	dataPath := flag.String("data", "", "Data to send (for now, must be a JSON file)")
 	username := flag.String("username", "", "Basic auth username")
@@ -65,12 +66,22 @@ func main() {
 	startTime := time.Now()
 
 	requestCount := 0
+	errorCount := 0
+	var resultsByStatus = make(map[string]int)
+
+	printResults := func() {
+		elapsedSeconds := time.Since(startTime) / time.Second
+		requestsPerSecond := requestCount / int(elapsedSeconds)
+		log.Printf("Sent %v requests at %v requests/second. Counts by status code:", requestCount, requestsPerSecond)
+		for status, count := range resultsByStatus {
+			log.Printf("%v: %v", status, count)
+		}
+		log.Printf("Errors: %v", errorCount)
+	}
 
 	go func() {
 		sig := <-sigs
-		elapsedSeconds := time.Since(startTime) / time.Second
-		requestsPerSecond := requestCount / int(elapsedSeconds)
-		log.Printf("Completed %v requests at %v requests/second.", requestCount, requestsPerSecond)
+		printResults()
 		log.Printf("Exiting on signal %v", sig)
 		os.Exit(0)
 	}()
@@ -78,6 +89,7 @@ func main() {
 	client := &http.Client{}
 
 	go func() {
+		count := 0
 		for _ = range ticker.C {
 			req, err := http.NewRequest(upperMethod, uri, bytes.NewReader(body))
 			if *username != "" || *password != "" {
@@ -90,13 +102,24 @@ func main() {
 				res: res,
 				err: err,
 			}
+			count++
+			if *limit > 0 && int64(count) == *limit {
+				printResults()
+				os.Exit(0)
+			}
 		}
 	}()
 
 	for result := range results {
 		requestCount++
+		if count, ok := resultsByStatus[result.res.Status]; ok {
+			resultsByStatus[result.res.Status] = count + 1
+		} else {
+			resultsByStatus[result.res.Status] = 1
+		}
 
 		if result.err != nil {
+			errorCount++
 			log.Printf("[ERR] %v %v: %v", upperMethod, uri, result.err)
 		} else {
 			log.Printf("[%v] %v %v", result.res.Status, upperMethod, uri)
